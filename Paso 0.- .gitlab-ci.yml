@@ -13,3 +13,161 @@ include:
 jenkflow:cicd-python-Plan-buildOCI:
   stage: cicd-python-Plan-buildOCI
   extends: .jenkflow
+
+  ======================================================
+  ese builder-tagging --> tiene un pipeline que llama 
+  ======================================================
+pipeline {
+  agent {
+    kubernetes {
+      label "${JOB_BASE_NAME}-${BUILD_NUMBER}"
+      defaultContainer 'pipeline-tools'
+      yaml """
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: pipeline-tools
+    image: 'quay-gnx-ssp-r01a-ip.mss.ms/gnx-images/pipeline-tools:0.0.46'
+    command: ['sleep']
+    args: ['30d']
+    securityContext:
+      privileged: true
+    env:
+      - name: GIT_SSL_NO_VERIFY
+        value: 'true'
+      - name: HTTP_PROXY
+        value: proxy-msc.msc.es:8080
+      - name: HTTPS_PROXY
+        value: proxy-msc.msc.es:8080
+      - name: NO_PROXY
+        value: .cluster.local,.msc.es,.sanidad.msc,.svc,10.144.0.0/14,10.15.47.160/27,127.0.0.1,172.34.0.0/16,api-int.ocp-ges-pub-01.ocp.ms,localhost
+    volumeMounts:
+      - name: gestion-crt-volume
+        mountPath: /usr/local/share/ca-certificates/custom-cert.crt
+        subPath: _.apps.ocp-ges-pub-01.ocp.ms.crt
+      - name: gestion-crt-volume
+        mountPath: /usr/local/share/ca-certificates/MSCCA1.cer
+        subPath: MSCCA1.cer
+  - name: npm-build
+    image: 'quay-gnx-ssp-r01a-ip.mss.ms/redhat-catalog/rhel9/nodejs-22:9.5-1733148753'
+    command: ['sleep']
+    args: ['30d']
+    securityContext:
+      privileged: true
+    env:
+      - name: GIT_SSL_NO_VERIFY
+        value: 'true'
+      - name: HTTP_PROXY
+        value: http://proxy-msc.msc.es:8080
+      - name: HTTPS_PROXY
+        value: http://proxy-msc.msc.es:8080
+      - name: NO_PROXY
+        value: .cluster.local,.msc.es,.sanidad.msc,.svc,10.144.0.0/14,10.15.47.160/27,127.0.0.1,172.34.0.0/16,api-int.ocp-ges-pub-01.ocp.ms,localhost
+
+  volumes:
+    - name: gestion-crt-volume
+      secret:
+        secretName: gestion-crt
+"""
+    }
+  }
+
+  parameters {
+    string(name: 'REPO_URL', defaultValue: '', description: 'Repository URL')
+    string(name: 'GIT_SHA', defaultValue: '', description: 'Commit SHA')
+    string(name: 'GIT_BRANCH', defaultValue: 'main', description: 'Branch')
+    string(name: 'MODULE', defaultValue: 'build-image', description: 'Logical module')
+    string(name: 'IMAGE_NAME', defaultValue: '', description: 'Image name (optional)')
+    string(name: 'CHART', defaultValue: '', description: 'Chart (optional)')
+    booleanParam(name: 'SHOULD_FAIL', defaultValue: false, description: 'Make this job fail (for testing)')
+    string(name: 'paramEXTRAS', defaultValue: '', description: 'Image name (optional)')
+  }
+
+  stages {
+    stage('Show parameters') {
+      steps {
+        echo "---- Received parameters ----"
+        echo "REPO_URL  = ${params.REPO_URL}"
+        echo "GIT_SHA   = ${params.GIT_SHA}"
+        echo "GIT_BRANCH= ${params.GIT_BRANCH}"
+        echo "MODULE    = ${params.MODULE}"
+        echo "IMAGE_NAME= ${params.IMAGE_NAME}"
+        echo "CHART     = ${params.CHART}"
+        echo "SHOULD_FAIL = ${params.SHOULD_FAIL}"
+        echo "------------------------------"
+      }
+    }
+
+    stage('Fake work') {
+      steps {
+        echo "Starting fake build steps..."
+        sh 'echo compiling...; sleep 1'
+        sh 'echo running tests...; sleep 1'
+        echo "Fake build steps completed."
+      }
+    }
+
+    stage('Emit envelope') {
+      steps {
+        script {
+          // Build a small JSON envelope compatible with EnvelopeParser
+          def envelope = [
+            module: params.MODULE,
+            status: (params.SHOULD_FAIL ? 'FAILURE' : 'SUCCESS'),
+            version: "0.0.1",
+            refs: [repo: params.REPO_URL, sha: params.GIT_SHA, branch: params.GIT_BRANCH]
+          ]
+          // Print the GNX_ORCH marker line so jenkflow's EnvelopeParser can detect it
+          echo "GNX_ORCH: ${groovy.json.JsonOutput.toJson(envelope)}"
+        }
+      }
+    }
+    stage('Image Construction in Python') {
+    steps {
+        script {
+            echo "===== ARGUMENTOS RECIBIDAS DESDE JENKFLOW ====="
+            echo "paramEXTRAS=${params.paramEXTRAS}"
+            def extras = params.paramEXTRAS   // la cadena completa
+
+            def map = extras.split(',').collectEntries { item ->
+                def (key, value) = item.split('=', 2)
+                [(key): value]
+            }
+            imagenOCI = build(
+                job: 'Services/arq-mss-r01/lmunozm/lmunozm-test01-mss/lmunozm-test01-mss-r01a-id/buildOCI-python',
+                parameters: [
+                    string(name: 'planOCI',    value: map.planOCI),
+                    string(name: 'URLPROJECT', value: params.REPO_URL),
+                    string(name: 'nameOCI',    value: map.nameOCI),
+                    string(name: 'repoOCI',    value: map.repoOCI),
+                    string(name: 'tagOCI',     value: map.tagOCI)
+                ],
+                wait: true,
+                propagate: true
+            )
+            echo "Pipeline finalizado con estado: ${imagenOCI.result}"
+            if (imagenOCI.result == 'FAILURE' || imagenOCI.result == 'ABORTED') {
+                error("La construcción de la imagen OCI falló con estado: ${imagenOCI.result}")
+            }
+           
+        }
+    }
+}
+
+    stage('Maybe fail') {
+      when {
+        expression { return params.SHOULD_FAIL == true }
+      }
+      steps {
+        error("Intentionally failing job (SHOULD_FAIL=true) for testing")
+      }
+    }
+  }
+
+  post {
+    always {
+      echo "Pipeline finished with status: ${currentBuild.currentResult}"
+    }
+  }
+}

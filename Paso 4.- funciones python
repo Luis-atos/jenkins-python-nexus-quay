@@ -1,0 +1,493 @@
+import argparse
+from typing import Dict, Any
+from validations.data_validation import validate_args
+from git.git_utils import clone_repo , find_plan_file, cleanup_directory_except
+from file.file_utils import load_plan_data, print_dict
+from nexus.nexus_utils import download_artefacts
+from quay.quay_utils import upload_oci_quay
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Script que ejecuta pipeline OCI")
+
+    parser.add_argument("--planOCI", type=str, required=True)
+    parser.add_argument("--URLPROJECT", type=str, required=True)
+    parser.add_argument("--nameOCI", type=str, required=True)
+    parser.add_argument("--repoOCI", type=str, required=True)
+    parser.add_argument("--tagOCI", type=str, default="")
+
+    parser.add_argument("--quay_user", type=str, required=True)
+    parser.add_argument("--quay_pass", type=str, required=True)
+
+    return parser.parse_args()
+
+
+
+def ProcessBuildOCI(args) -> bool:
+    print("Ejecutando proyecto Python desde Jenkins y GitLab...")
+    print("===== Ejecutando run() =====")
+    print(f"planOCI   : {args.planOCI}")
+    print(f"URLPROJECT: {args.URLPROJECT}")
+    print(f"nameOCI   : {args.nameOCI}")
+    print(f"repoOCI   : {args.repoOCI}")
+    print(f"tagOCI    : {args.tagOCI}")
+    print("============================")
+        
+    valid_args = validate_args(args)
+    print(f"valid   : {valid_args}")
+    valid = valid_args
+    target_dir = f"/commonArea/{args.nameOCI}"
+    valid_clone = clone_repo(args, target_dir,"gitlab-ci-token", "glcbt-64_gvR3JhCBrFy_63BPCjTm")
+    print(f"valid   : {valid_clone}")
+    valid = valid_clone
+    keep_file = find_plan_file(target_dir)
+    print(f"[INFO] Archivo encontrado: {keep_file}")
+    target_dir_yml = f"/commonArea/{args.nameOCI}/{keep_file}"
+    cleanup_directory_except(target_dir, keep_file)
+    plan_dict= load_plan_data(target_dir_yml)
+    print_dict(plan_dict,1)
+    download_artefacts(plan_dict, excluir=["serviceTest","std","adv"])
+    upload_oci_quay(args)
+    return valid
+
+    
+if __name__ == "__main__":
+    
+    plan_dict: Dict[str, Any] = {}
+    oci_created = False
+    args = parse_args()
+    oci_created =ProcessBuildOCI(args)
+
+
+=============================================================
+def validate_args(args) -> bool:
+    missing = []
+    valid_args=True
+    if not args.planOCI.strip():
+        missing.append("planoci")
+    if not args.URLPROJECT.strip():
+        missing.append("urlproject")
+    if not args.nameOCI.strip():
+        missing.append("nameoci")
+    if not args.repoOCI.strip():
+        missing.append("repooci")
+
+    if missing:
+        print("ERROR: Faltan los siguientes parámetros obligatorios:")
+        valid_args=False
+        for param in missing:
+            print(f" - {param}")
+        print("\nPor favor, complete los parámetros y vuelva a ejecutar.")
+    return valid_args
+======================================================================================
+import subprocess
+import shutil
+import os
+from urllib.parse import quote
+
+def cleanup_directory_except(directory: str, keep_filename: str) -> None:
+    for name in os.listdir(directory):
+        if name == keep_filename:
+            continue  # No borrar el archivo plan
+        
+        path = os.path.join(directory, name)
+
+        if os.path.isfile(path) or os.path.islink(path):
+            os.remove(path)
+            print(f"[INFO] Archivo eliminado: {path}")
+
+        elif os.path.isdir(path):
+            shutil.rmtree(path)
+            print(f"[INFO] Directorio eliminado: {path}")
+
+
+
+def find_plan_file(directory: str) -> str:
+    for name in os.listdir(directory):
+        if name.startswith("plan"):
+            return name
+    raise FileNotFoundError("No se encontró ningún archivo que empiece por 'plan'")
+# ----------------------------------------------------------------------------------
+class GitCloneError(Exception):
+    """Error personalizado para fallos al clonar un repositorio Git."""
+    pass
+
+
+def clone_repo(args, target_dir, username, password) -> bool:
+    valid_clone = True
+    if not shutil.which("git"):
+        valid_clone = False
+        raise GitCloneError("El binario 'git' no está disponible en el entorno.")
+
+    if not args.URLPROJECT.startswith("https://"):
+        valid_clone = False
+        raise ValueError("El repositorio debe ser HTTPS para usar autenticación segura.")
+
+    if not username or not password:
+        valid_clone = False
+        raise ValueError("Las credenciales no pueden ser vacías.")
+
+    # Codifica username/password por si contienen caracteres especiales
+    username_enc = quote(username)
+    password_enc = quote(password)
+
+    # Construcción segura de la URL con credenciales
+    protocol, path = args.URLPROJECT.split("@", 1)
+    auth_url = f"https://{username_enc}:{password_enc}@{path}"
+
+    # Masking para logs (NUNCA mostrar los secretos)
+    masked_auth_url = auth_url.replace(password_enc, "****")
+
+    print(f"[INFO] Clonando repositorio: {masked_auth_url}")
+    print(f"[INFO] Directorio destino: {target_dir}")
+
+    # Si el directorio existe, abortamos
+    if os.path.exists(args.nameOCI):
+        valid_clone = False
+        raise GitCloneError(f"El directorio destino ya existe: {target_dir}")
+
+    # --- Ejecución del comando git clone --------------------------------------
+    try:
+        
+        result = subprocess.run(
+            ["git", "clone", auth_url, target_dir],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+
+        print("[INFO] Clone completado correctamente.")
+        print("[GIT STDOUT]")
+        print(result.stdout)
+        
+    except subprocess.CalledProcessError as e:
+        valid_clone = False
+        print("[ERROR] Fallo al ejecutar git clone")
+        print("[GIT STDOUT]")
+        print(e.stdout)
+        print("[GIT STDERR]")
+        print(e.stderr)
+
+        raise GitCloneError(
+            f"git clone falló con código {e.returncode}. "
+            f"URL usada (oculta): {masked_auth_url}"
+        ) from e
+    return valid_clone
+========================================================================
+import yaml
+from typing import Dict, Any
+
+def print_dict(data: Dict[str, Any], indent: int = 0) -> None:
+    for key, value in data.items():
+        print('  ' * indent + str(key) + ':', end=' ')
+        if isinstance(value, dict):
+            print()  # salto de línea antes de imprimir sub-diccionario
+            print_dict(value, indent + 1)
+        else:
+            print(value)
+
+def load_plan_data(yaml_file_path: str) -> Dict[str, Any]:
+    print("[DEBUG] Leyendo YAML:", yaml_file_path)
+
+    with open(yaml_file_path, "r") as f:
+        data = yaml.safe_load(f)
+    print("[DEBUG] Claves raíz:", data.keys())
+
+    plan = data["spec"]["plan"]
+    print("[DEBUG] Componentes encontrados:", list(plan.keys()))
+
+    extracted = {}
+
+    for component, info in plan.items():
+        print(f"[DEBUG] Procesando componente: {component}")
+
+        extracted[component] = {}
+
+        if isinstance(info, dict) and "downloadURL" in info:
+            extracted[component] = {
+                "downloadURL": info.get("downloadURL"),
+                "version": info.get("version"),
+                "md5": info.get("md5")
+            }
+            continue
+
+        for key, subinfo in info.items():
+            if isinstance(subinfo, dict) and "downloadURL" in subinfo:
+                extracted[component][key] = {
+                    "downloadURL": subinfo.get("downloadURL"),
+                    "version": subinfo.get("version"),
+                    "md5": subinfo.get("md5")
+                }
+
+    print("[DEBUG] Resultado final:", extracted)
+    return extracted
+======================================================================
+import os
+import requests
+
+def download_artefacts(mdp: dict, destino="/commonArea/artifacts", excluir=None):
+    print(f"Procesando artefactos desde mapa: {mdp}")
+    if excluir is None:
+        excluir = []
+
+    print(f"Procesando artefactos desde mapa, excluyendo: {excluir}")
+    os.makedirs(destino, exist_ok=True)
+
+    for comp, data in mdp.items():
+        if comp in excluir:
+            print(f"→ Componente {comp} excluido, se omite.")
+            continue
+        for sub_name, artifact in data.items():
+            try:
+                url = artifact.get("downloadURL")
+                version = artifact.get("version")
+                if not url:
+                    print(f"→ No hay URL para {comp}-{sub_name}, se omite.")
+                    continue
+                
+                file_name = url.split('/')[-1]          # Tomamos el nombre desde la URL
+                extension = file_name.split('.')[-1]    # Detectamos extensión
+                file_path = os.path.join(
+                    destino,
+                    f"{comp}-{sub_name.lower()}-{version}.zip"
+                )
+
+                if extension == "jar":
+                    file_path = os.path.join(destino, f"{comp}-{file_name}")
+                    print(f"→ Archivo JAR detectado, se guardará como {file_path}")
+                else:
+                    print(f"→ Archivo {extension} detectado, se guardará como {file_path}")
+
+                # Descargar el archivo
+                with requests.get(url, stream=True, verify=False) as r:
+                    r.raise_for_status()
+                    with open(file_path, "wb") as f:
+                        for chunk in r.iter_content(chunk_size=8192):
+                            f.write(chunk)
+
+                print(f"✔ Descarga completada: {file_path}")
+
+            except Exception as e:
+                print(f"❌ Fallo en la descarga del componente {comp}-{sub_name}: {e}")
+                raise
+===================================================================================================
+import os
+import tarfile
+import requests
+import re
+import shutil
+import zipfile
+import json
+import urllib3
+import subprocess
+from podman import PodmanClient
+import io
+
+
+# ================= Suprimir warning HTTPS no verificado =================
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+def sanitize_image_name(nameimage: str) -> str:
+    if '/' not in nameimage:
+        return nameimage  # no hay repo/namespace
+    
+    registry_repo, tag = nameimage.rsplit(':', 1)  # separar tag
+    registry_parts = registry_repo.split('/')
+    
+    # último segmento es el repo con guiones
+    repo_name = registry_parts[-1]
+        
+    safe_repo_tag = f"{repo_name}:{tag}"
+    return safe_repo_tag
+
+
+def login_image_updateQuay(quay_user: str, quay_password: str, repo_quay: str, path_codigo: str, nameimage: str) -> None:
+    print("==============================================================")
+    print(f"[INFO] parámetros -> path: {path_codigo} | image: {nameimage}")
+    print("==============================================================")
+    quay_registry = "quay-gnx-ssp-r01a-ip.mss.ms"
+    ca_path = "/etc/ssl/certs/ca-certificates.crt"
+
+    # Asegurar que el CA existe
+    if not os.path.isfile(ca_path):
+        raise FileNotFoundError(f"No se encuentra el CA en {ca_path}")
+    print(f"[INFO] CA bundle encontrado en: {ca_path}")
+
+    # Verificar TLS / ping endpoint /v2/
+    registry_url = f"https://{quay_registry}:443/v2/"
+    try:
+        r = requests.get(registry_url, verify=ca_path)
+        print("[INFO] TLS OK, status code:", r.status_code)
+    except requests.exceptions.SSLError as e:
+        raise RuntimeError(f"[ERROR] TLS falló al conectar con {registry_url}: {e}")
+
+    # Listar y cambiar path
+    print("[INFO] Listando path...")
+    subprocess.run(["ls", "-l", path_codigo])
+    os.chdir(path_codigo)
+
+    safe_name_tag = sanitize_image_name(nameimage)
+    safe_name, tagPlan = safe_name_tag.rsplit(':', 1)  # separar tag
+    print("Nombre corto recibido ..:", safe_name)
+    print("Version recibida ..:", tagPlan)
+
+    with PodmanClient(base_url="unix:///run/podman/podman.sock") as client:
+
+        for container in client.containers.list():
+            print(container, container.id, "\n")
+            print(container, container.status, "\n")
+            print(sorted(container.attrs.keys()))
+
+        version = client.version()
+        print("Release: ", version["Version"])
+        print("Compatible API: ", version["ApiVersion"])
+        print("Podman API: ", version["Components"][0]["Details"]["APIVersion"], "\n")
+
+        print("[INFO] Login en Quay…")
+        if not quay_user or not quay_password:
+          raise RuntimeError("No se encontraron las variables de entorno REGISTRY_USER o REGISTRY_PASS")
+        os.environ["REQUESTS_CA_BUNDLE"] = ca_path
+        os.environ["SSL_CERT_FILE"] = ca_path
+        
+        token = client.login(
+            registry=f"{quay_registry}:443",
+            username=quay_user,
+            password=quay_password
+        )
+        print("Login exitoso, token recibido:", token)
+        
+        print("Login completado ✔")
+        print("[INFO] Login OK ✔")
+
+        # Crear contenedor base
+        client.images.pull("alpine:3.20")
+        ctr = client.containers.create(
+            image="alpine:3.20",
+            name="builder-temp",
+            command=["sleep", "infinity"],
+        )
+        ctr.start()
+        for container in client.containers.list():
+            print(container, container.id, "\n")
+            print(sorted(container.attrs.keys()))
+
+        try:
+            print("[INFO] Empaquetando carpeta para copiar al contenedor…")
+            tar_stream = io.BytesIO()
+            with tarfile.open(fileobj=tar_stream, mode="w") as tar:
+                tar.add(path_codigo, arcname=".")
+            tar_stream.seek(0)
+
+            ctr.put_archive("/app", tar_stream.read())
+            print("[INFO] Código copiado ✔")
+
+            # Commit de imagen
+            full_image_name = f"{quay_registry}:443/{repo_quay}/{safe_name}:{tagPlan}"
+            print("[INFO] Creando imagen…")
+            new_image = ctr.commit(safe_name)
+
+            # Tag final
+            if ":" in full_image_name:
+                repository, tag = full_image_name.rsplit(":", 1)
+            else:
+                repository = full_image_name
+                tag = "latest"
+
+            print(f"[DEBUG] repository={repository}, tag={tag}")
+
+            # Taguear la imagen
+            new_image.tag(repository=repository, tag=tag)
+            print(f"[INFO] Tag creado: {full_image_name}")
+
+            print("[INFO] Realizando push…")
+            auth_config = {"username": quay_user, "password": quay_password}
+            for line in client.images.push(full_image_name, auth_config=auth_config, stream=True):
+                print(line.strip())
+            print("[INFO] Push completado ✔")
+
+        finally:
+            ctr.stop()
+            ctr.remove()
+            print("[INFO] Contenedor limpiado ✔")
+
+        
+
+def upload_oci_quay(args):
+    images = []
+     
+    APP_DIR = "/commonArea/fuentes"
+    os.makedirs(APP_DIR, exist_ok=True)
+
+    artifacts_dir = "/commonArea/artifacts"
+    zip_files = [f for f in os.listdir(artifacts_dir) if f.endswith(('.zip', '.jar'))]
+
+    QUAY_USER = args.quay_user
+    QUAY_PASS = args.quay_pass
+    IMAGE_PUBLIC = "registry.access.redhat.com/ubi8/podman"
+
+    if not QUAY_USER or not QUAY_PASS:
+        raise ValueError("Credenciales QUAY_USER / QUAY_PASS no establecidas")
+
+    # Conectar al socket de Podman (sidecar)
+    with PodmanClient(base_url="unix:///run/podman/podman.sock") as client:
+        print(client.system.info())
+        # ================= Verificar y descargar imagen base =================
+        print(f"[INFO] Verificando imagen base {IMAGE_PUBLIC}")
+         
+        # ================= Procesar artefactos =================
+        for zip_file in zip_files:
+            print("========================================")
+            print(f"[INFO] Procesando artefacto: {zip_file}")
+            print("========================================")
+            extension = zip_file.split('.')[-1]
+            nombre_sin_extension = re.sub(r'\.[^.]+$', '', zip_file)
+            destino = nombre_sin_extension
+
+            # Limpiar y crear directorio temporal
+            if os.path.exists(APP_DIR + "/miapp/" + destino):
+                shutil.rmtree(APP_DIR + "/miapp/" + destino)
+            os.makedirs(APP_DIR + "/miapp/" + destino)
+
+            try:
+                src_path = os.path.join(artifacts_dir, zip_file)
+                if extension == "zip":
+                    with zipfile.ZipFile(src_path, 'r') as zip_ref:
+                        zip_ref.extractall(APP_DIR + "/miapp/" + destino)
+                    print(f"[INFO] Descomprimido ZIP: {zip_file} en {APP_DIR}/miapp/{destino}")
+                    subprocess.run(["ls", "-l",APP_DIR + "/miapp/" + destino])
+                elif extension == "jar":
+                    shutil.copy2(src_path, APP_DIR + "/miapp/" + destino)
+                    print(f"[INFO] JAR copiado: {zip_file} en {APP_DIR}/miapp/{destino}")
+                    subprocess.run(["ls", "-l",APP_DIR + "/miapp/" + destino])
+            except Exception as e:
+                print(f"[ERROR] Fallo preparando {zip_file}: {e}")
+                raise
+
+            # Construcción de nombre de imagen
+            base_name = re.sub(r'\.(zip|jar)$', '', zip_file)
+            matcher = re.search(r'(\d+\.\d+\.\d+(?:-[A-Za-z0-9._]+)?)', base_name)
+            VERSION = matcher.group(1) if matcher else "version_desconocida"
+            result_name = base_name.replace(f"-{VERSION}", "")
+
+            parts = args.nameOCI.split('-')
+            # Tomar los primeros 4 elementos
+            first_four = parts[:4]
+            # Buscar la parte que contiene 'r01a'
+            r01a_part = next((p for p in parts if 'r01a' in p), "")
+            # Combinar todo
+            new_name = '-'.join(first_four + [r01a_part])
+            print(new_name)
+            IMAGE = f"quay-gnx-ssp-r01a-ip.mss.ms/{args.repoOCI}/{result_name}-{args.nameOCI}:{VERSION}".lower()
+            images.append(IMAGE)
+            print(f"[INFO] Construyendo imagen: {IMAGE}")
+            print(f"[INFO] ---- listado: {IMAGE}")
+            subprocess.run(["ls", "-l",APP_DIR + "/miapp/" + destino])
+            login_image_updateQuay(QUAY_USER, QUAY_PASS, args.repoOCI, APP_DIR + "/miapp/" + destino, IMAGE)
+            
+    return images
+
+
+
+
+
+

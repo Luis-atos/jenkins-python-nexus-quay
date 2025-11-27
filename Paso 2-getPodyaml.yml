@@ -1,0 +1,174 @@
+// Fichero: podParts.groovy
+def getGitContainerYaml() {
+    return """
+    - name: git-nexus-quay
+      image: quay-gnx-ssp-r01a-ip.mss.ms/gnx-images/git-python3:0.0.1-dev_test_gc-lmm
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          echo "=== Actualizando certificados del secret ca-bundle (Debian) ==="
+          # Renombrar .pem a .crt si es necesario
+          for f in /usr/local/share/ca-certificates/custom/*.pem; do
+              mv "\$f" "\${f%.pem}.crt"
+          done
+          update-ca-certificates --fresh
+          echo "Esperando 10 segundos para sincronizar el shared-volume..."
+          sleep 10
+          export REQUESTS_CA_BUNDLE=/etc/ssl/certs/ca-certificates.crt
+          export SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+          echo "Git Nexus Quay running..."
+          sleep 30d
+      tty: false
+      stdin: false
+      securityContext:
+        privileged: true
+      env:
+        - name: HTTP_PROXY
+          value: "http://proxy-sanidad.msc.es:8080"
+        - name: HTTPS_PROXY
+          value: "http://proxy-sanidad.msc.es:8080"
+        - name: NO_PROXY
+          value: "localhost,127.0.0.1"
+        - name: HOME
+          value: /home/jenkins/agent
+        - name: CONTAINER_HOST
+          value: unix:///run/podman/podman.sock
+      volumeMounts:
+        - name: shared-run
+          mountPath: /run/podman
+        - name: shared-volume
+          mountPath: /commonArea
+        - name: shared-volume
+          mountPath: /home/jenkins/agent
+          readOnly: false
+        - name: ca-bundle
+          mountPath: /usr/local/share/ca-certificates/custom
+          readOnly: true
+
+    - name: podman-daemon
+      image: registry.access.redhat.com/ubi8/podman
+      securityContext:
+        privileged: true
+      env:
+        - name: HTTP_PROXY
+          value: "http://proxy-sanidad.msc.es:8080"
+        - name: HTTPS_PROXY
+          value: "http://proxy-sanidad.msc.es:8080"
+        - name: NO_PROXY
+          value: "localhost,127.0.0.1"
+      command: ["/bin/bash", "-c"]
+      args:
+        - |
+          echo "===== Iniciando Podman service ====="
+          
+          mkdir -p /etc/containers/certs.d/quay-gnx-ssp-r01a-ip.mss.ms:443
+          cp /usr/local/share/ca-certificates/custom/*.crt \
+             /etc/containers/certs.d/quay-gnx-ssp-r01a-ip.mss.ms:443/ca.crt
+          chmod 644 /etc/containers/certs.d/quay-gnx-ssp-r01a-ip.mss.ms:443/ca.crt
+          update-ca-trust extract
+          echo "Esperando 10 segundos para sincronizar..."
+          sleep 10
+          # Lanzar Podman service en background
+          echo "[INFO] Iniciando Podman daemon en background..."
+          podman system service -t 0 unix:///run/podman/podman.sock &
+
+          # Espera activa hasta que el socket exista
+          echo "[INFO] Esperando a que el socket de Podman esté listo..."
+          for i in {1..30}; do
+            if [ -S /run/podman/podman.sock ]; then
+                echo "[INFO] Socket de Podman listo ✔"
+                break
+            fi
+            sleep 1
+          done
+          echo "[INFO] Socket de Podman listo ✔"
+          echo "[INFO] Probando TLS y certificado con login dummy..."
+          podman login quay-gnx-ssp-r01a-ip.mss.ms --username usr-a.lmunozm --password dummy || echo "[WARN] Login dummy fallo, pero TLS OK"
+          echo "===== Podman daemon listo ====="
+          sleep 30d
+      volumeMounts:
+        - name: shared-run
+          mountPath: /run/podman
+        - name: shared-volume
+          mountPath: /commonArea
+        - name: ca-bundle
+          mountPath: /usr/local/share/ca-certificates/custom
+          readOnly: true
+    """
+}
+
+def getSpectralContainerYaml() {
+    return """
+    - name: spectral
+      image: quay-gnx-ssp-r01a-ip.mss.ms/gnx-images/stoplight-spectral:6.14
+      command: ['sleep']
+      args: ['30d']
+      tty: false
+      stdin: false
+      env:
+        - name: NODE_TLS_REJECT_UNAUTHORIZED
+          value: '0'
+      volumeMounts:
+        - name: shared-volume
+          mountPath: /commonArea
+        - name: shared-volume
+          mountPath: /home/jenkins/agent
+          readOnly: false
+        - name: ca-bundle
+          mountPath: /usr/local/share/ca-certificates/custom
+          readOnly: true
+    """
+}
+
+def getJnlpContainerYaml() {
+    return """
+    - name: jnlp
+      image: jenkins/inbound-agent:3309.v27b_9314fd1a_4-1
+      env:
+        - name: HOME
+          value: /home/jenkins
+      volumeMounts:
+        - name: shared-volume
+          mountPath: /commonArea
+        - name: shared-volume
+          mountPath: /home/jenkins/agent
+          readOnly: false
+        - name: ca-bundle
+          mountPath: /usr/local/share/ca-certificates/custom
+          readOnly: true
+    """
+}
+
+def getVolumesYaml() {
+    return """
+  volumes:
+    - name: shared-volume
+      emptyDir: {}
+    - name: shared-run
+      emptyDir: {}
+    - name: ca-bundle
+      secret:
+        secretName: ca-bundle
+    """
+}
+
+// Función que junta todo
+def getPodYaml() {
+    return """
+apiVersion: v1
+kind: Pod
+metadata:
+  name: jenkins-agent-pod
+spec:
+  restartPolicy: Never
+  securityContext:
+    runAsUser: 0
+    runAsGroup: 0
+    fsGroup: 0
+${getVolumesYaml()}
+  containers:
+${getGitContainerYaml()}
+${getSpectralContainerYaml()}
+${getJnlpContainerYaml()}
+"""
+}

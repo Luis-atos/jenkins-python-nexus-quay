@@ -1,0 +1,15 @@
+# el comando  job-name: "Builds/gnx/python-modules/python-Plan-buildOCI/builder-tagging" es la llamada al pipeline
+stages:
+  - cicd-python-Plan-buildOCI
+  
+include:
+  - component: $CI_SERVER_FQDN/automation/pipelines/gitlab/components/jenkflow/jenkflow@0.1.0  # esto esta codificado en el repo jenkflow que indica la ruta
+    inputs:
+      module: "python"
+      job-name: "Builds/gnx/python-modules/python-Plan-buildOCI/builder-tagging"
+      verbose: false
+      skip-tls: true
+      args: --params paramEXTRAS=planOCI=vs-00|sb-00,nameOCI=lmunozm-test01-mss-r01a-id,repoOCI=gnx-images01,tagOCI=0.0.1-lmm
+jenkflow:cicd-python-Plan-buildOCI:
+  stage: cicd-python-Plan-buildOCI
+  extends: .jenkflow

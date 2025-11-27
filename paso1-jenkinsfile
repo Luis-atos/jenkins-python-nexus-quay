@@ -1,0 +1,101 @@
+@Library('services-pipelines-OCI@feat_luis_OCI') _
+
+pipeline {
+    agent {
+        kubernetes {
+            label "${JOB_BASE_NAME}-${BUILD_NUMBER}"
+            defaultContainer 'git-nexus-quay'
+            yaml "${utils.getPodYaml()}"
+        }
+    }
+
+    options {
+        ansiColor("xterm")
+        timeout(time: 60, unit: 'MINUTES')
+    }
+
+    parameters {
+        string(name: 'URLPROJECT', defaultValue: '', description: 'URL del proyecto SVN')
+        string(name: 'planOCI', defaultValue: '', description: 'Componentes del Plan para crear imagen en Quay')
+        string(name: 'nameOCI', defaultValue: '', description: 'Nombre del componente OCI')
+        string(name: 'repoOCI', defaultValue: '', description: 'Repositorio OCI')
+        string(name: 'tagOCI', defaultValue: '', description: 'Tag común para crear imagen en Quay')
+    }
+     environment {
+        HTTP_PROXY = "http://proxy-sanidad.msc.es:8080"
+        HTTPS_PROXY = "http://proxy-sanidad.msc.es:8080"
+        NO_PROXY = "localhost,127.0.0.1"
+    }
+
+    stages {
+        stage('Prepare Environment') {
+            steps {
+                container('git-nexus-quay') {
+                    script {
+                        withCredentials([
+                            usernamePassword(credentialsId: 'git-nexus-quay-token', usernameVariable: 'GITLAB_USER', passwordVariable: 'GITLAB_PASSWORD')
+                        ]) {
+                            sh """
+                                set -e
+                                mkdir -p /commonArea/zonaPython
+                                pip install pyyaml
+                                pip install --user podman
+                                export PATH=\$HOME/.local/bin:\$PATH
+                                echo "Podman-py instalado"
+
+                                # Clonar repositorio de scripts Python
+                                git config --global http.sslVerify false
+                                git clone -b feature/OCIbuild https://\$GITLAB_USER:\$GITLAB_PASSWORD@gitlab-gnx.mss.ms/automation/python-modules/python_podman.git /commonArea/zonaPython
+                                export PYTHONPATH=/commonArea/zonaPython/src:\$PYTHONPATH
+                                ls -l /commonArea/zonaPython/src
+                            """
+                        }
+                    }
+                }
+            }
+        }
+        stage('Run Python OCI Upload') {
+            steps {
+                container('git-nexus-quay') {
+                    script {
+                         withCredentials([
+                            usernamePassword(credentialsId: 'nexus-quay-credentials', usernameVariable: 'QUAY_USER', passwordVariable: 'QUAY_PASS')
+                        ]) {
+                         withEnv([
+                        'PODMAN_URI=unix:///run/podman/podman.sock'
+                        ]) {
+                        sh """
+                            set -e
+                            echo "--- SOCKET ---"
+                            ls -l /run/podman
+                            python3 /commonArea/zonaPython/src/main.py \
+                              --planOCI "${params.planOCI}" \
+                              --URLPROJECT "${params.URLPROJECT}" \
+                              --nameOCI "${params.nameOCI}" \
+                              --repoOCI "${params.repoOCI}" \
+                              --tagOCI "${params.tagOCI}" \
+                              --quay_user \$QUAY_USER \
+                              --quay_pass \$QUAY_PASS
+                        """
+                        }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    post {
+        success {
+            script {
+                logUtils("info","Pipeline completed successfully",params.URLPROJECT)
+            }
+        }
+        failure {
+            script {
+                logUtils("error","Pipeline failed. Error message: ${env.PIPELINE_ERROR_MESSAGE} ${env.ERROR_STAGE}",params.URLPROJECT)
+            }
+        }
+    }
+}
+
